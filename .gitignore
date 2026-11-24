@@ -1,0 +1,11 @@
+node_modules/
+frames/
+assets/
+capture.mjs
+render_scenes.py
+compose.sh
+video.mp4
+main.mp4
+check/
+out/
+.DS_Store

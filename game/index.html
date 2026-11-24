@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Star Flip — one-button arcade</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #0b0620; height: 100%; overflow: hidden; }
+  #game { display: block; width: 100vw; height: 100vh; }
+  #hint {
+    position: fixed; left: 0; right: 0; bottom: 14px; text-align: center;
+    color: #ffffffcc; font: 600 15px/1.4 system-ui, sans-serif;
+    pointer-events: none; letter-spacing: .04em;
+  }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div id="hint">SPACE / CLICK / TAP — flip gravity &nbsp;·&nbsp; grab stars, dodge rocks</div>
+<script>
+'use strict';
+// Star Flip — one-button arcade, built from a single prompt.
+// The rocket flies on its own. One input flips gravity. Stars score,
+// asteroids end the run, speed grows with the score.
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const params = new URLSearchParams(location.search);
+const AUTOPLAY = params.get('autoplay') === '1';
+
+let W = 0, H = 0, DPR = 1;
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = W * DPR; canvas.height = H * DPR;
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+}
+window.addEventListener('resize', resize);
+resize();
+
+// ---- world state ----
+const ship = { x: 0, y: 0, vy: 0, r: 16, angle: 0 };
+let gravity = 1;          // 1 = pulls down, -1 = pulls up
+let speed = 260;          // px/s, grows with score
+let score = 0, best = 0, distance = 0;
+let state = 'ready';      // ready | playing | over
+let stars = [], rocks = [], bgStars = [], trail = [];
+let spawnT = 0, starT = 0, time = 0, flash = 0, overT = 0;
+
+try { best = Number(localStorage.getItem('starflip-best') || 0); } catch (e) { best = 0; }
+
+function reset() {
+  ship.x = Math.max(120, W * 0.22);
+  ship.y = H / 2; ship.vy = 0; ship.angle = 0;
+  gravity = 1; speed = 260; score = 0; distance = 0;
+  stars = []; rocks = []; trail = [];
+  spawnT = 0; starT = 0; flash = 0;
+  state = 'playing';
+  for (let i = 0; i < 90; i++) bgStars.push({ x: Math.random() * W, y: Math.random() * H, s: Math.random() * 2 + 0.5, tw: Math.random() * 6.28 });
+}
+
+function flip() {
+  if (state === 'ready' || state === 'over') { reset(); return; }
+  gravity = -gravity;
+  ship.vy = -gravity * 60;
+}
+
+window.addEventListener('keydown', (e) => {
+  if (e.code === 'Space' || e.code === 'ArrowUp') { e.preventDefault(); flip(); }
+  if (e.code === 'KeyR' && state === 'over') reset();
+});
+canvas.addEventListener('pointerdown', flip);
+
+function spawnStar() {
+  stars.push({ x: W + 40, y: 50 + Math.random() * (H - 100), r: 12, ph: Math.random() * 6.28, got: false });
+}
+function spawnRock() {
+  const r = 16 + Math.random() * 26;
+  const edge = Math.random() < 0.5 ? 0 : 1; // top or bottom band, so a lane stays open
+  const y = edge === 0
+    ? 30 + Math.random() * (H * 0.32)
+    : H - 30 - Math.random() * (H * 0.32);
+  rocks.push({ x: W + 60, y, r, rot: Math.random() * 6.28, vr: (Math.random() - 0.5) * 2 });
+}
+
+function die() {
+  state = 'over'; flash = 1;
+  if (score > best) {
+    best = score;
+    try { localStorage.setItem('starflip-best', String(best)); } catch (e) {}
+  }
+}
+
+function update(dt) {
+  time += dt;
+  for (const s of bgStars) { s.x -= speed * 0.25 * dt; if (s.x < -4) { s.x = W + 4; s.y = Math.random() * H; } }
+  if (state !== 'playing') {
+    // In autoplay footage mode, fly again shortly after a game over so the
+    // clip never sits on a dead screen.
+    if (AUTOPLAY && state === 'over') {
+      overT += dt;
+      if (overT > 1.2) { overT = 0; reset(); }
+    }
+    return;
+  }
+
+  distance += speed * dt;
+  speed = 260 + Math.min(420, score * 6);
+
+  ship.vy += gravity * 1500 * dt;
+  ship.vy = Math.max(-620, Math.min(620, ship.vy));
+  ship.y += ship.vy * dt;
+  ship.angle = Math.max(-0.5, Math.min(0.5, ship.vy / 900)) * (gravity > 0 ? 1 : -1);
+  trail.push({ x: ship.x - 18, y: ship.y, life: 0.35 });
+  if (trail.length > 26) trail.shift();
+  for (const t of trail) t.life -= dt;
+  trail = trail.filter((t) => t.life > 0);
+
+  if (ship.y - ship.r < 0 || ship.y + ship.r > H) die();
+
+  spawnT -= dt; starT -= dt;
+  if (spawnT <= 0) { spawnRock(); spawnT = 0.55 + Math.random() * 0.55; }
+  if (starT <= 0) { spawnStar(); starT = 0.7 + Math.random() * 0.7; }
+
+  for (const s of stars) { s.x -= speed * dt; s.ph += dt * 5; }
+  for (const r of rocks) { r.x -= speed * dt; r.rot += r.vr * dt; }
+  stars = stars.filter((s) => s.x > -40 && !s.got);
+  rocks = rocks.filter((r) => r.x > -80);
+
+  for (const s of stars) {
+    const dx = s.x - ship.x, dy = s.y - ship.y;
+    if (dx * dx + dy * dy < (s.r + ship.r) * (s.r + ship.r)) { s.got = true; score += 10; }
+  }
+  for (const r of rocks) {
+    const dx = r.x - ship.x, dy = r.y - ship.y;
+    if (dx * dx + dy * dy < (r.r + ship.r - 6) * (r.r + ship.r - 6)) { die(); return; }
+  }
+
+  if (AUTOPLAY) autopilot();
+}
+
+// Tiny autopilot so the game can play itself for footage: predict the ship's
+// height when the nearest rock ahead arrives, and flip when that puts the
+// ship on a collision course; otherwise drift back toward the middle band
+// (rocks only spawn in the top/bottom bands, so the middle is safe).
+function autopilot() {
+  const horizon = 420;
+  const ahead = rocks
+    .filter((r) => r.x > ship.x - 10 && r.x - ship.x < horizon)
+    .sort((a, b) => a.x - b.x);
+  for (const r of ahead.slice(0, 2)) {
+    const tHit = (r.x - ship.x) / speed;
+    const yPred = ship.y + ship.vy * tHit + 0.5 * gravity * 1500 * tHit * tHit;
+    if (Math.abs(r.y - yPred) < r.r + ship.r + 24) {
+      const towardRock = (r.y > ship.y && gravity > 0) || (r.y < ship.y && gravity < 0);
+      if (towardRock) { flip(); return; }
+    }
+  }
+  if (ship.y > H * 0.62 && gravity > 0) { flip(); return; }
+  if (ship.y < H * 0.38 && gravity < 0) { flip(); return; }
+  // Chase a nearby star only when the lane ahead is clear.
+  const threat = ahead[0];
+  if (!threat || threat.x - ship.x > 300) {
+    const star = stars
+      .filter((s) => s.x > ship.x && s.x - ship.x < 220)
+      .sort((a, b) => a.x - b.x)[0];
+    if (star && Math.abs(star.y - ship.y) > 70) {
+      if ((star.y < ship.y && gravity > 0) || (star.y > ship.y && gravity < 0)) flip();
+    }
+  }
+}
+
+function drawStar(cx, cy, r, color) {
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  for (let i = 0; i < 10; i++) {
+    const a = -Math.PI / 2 + (i * Math.PI) / 5;
+    const rr = i % 2 === 0 ? r : r * 0.45;
+    ctx[i === 0 ? 'moveTo' : 'lineTo'](Math.cos(a) * rr, Math.sin(a) * rr);
+  }
+  ctx.closePath(); ctx.fill();
+  ctx.restore();
+}
+
+function draw() {
+  // sky
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#160b3d'); g.addColorStop(0.55, '#0b0620'); g.addColorStop(1, '#2b0f45');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+
+  for (const s of bgStars) {
+    ctx.globalAlpha = 0.35 + 0.65 * Math.abs(Math.sin(time + s.tw));
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(s.x, s.y, s.s, s.s);
+  }
+  ctx.globalAlpha = 1;
+
+  // trail
+  for (const t of trail) {
+    ctx.globalAlpha = Math.max(0, t.life) * 1.6;
+    ctx.fillStyle = gravity > 0 ? '#ff9d00' : '#00d4ff';
+    ctx.beginPath(); ctx.arc(t.x, t.y, 5 + (0.35 - t.life) * 14, 0, 6.29); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  // stars
+  for (const s of stars) {
+    const pulse = 1 + Math.sin(s.ph) * 0.15;
+    ctx.save();
+    ctx.shadowColor = '#ffd23f'; ctx.shadowBlur = 18;
+    drawStar(s.x, s.y, s.r * pulse, '#ffd23f');
+    ctx.restore();
+  }
+
+  // rocks
+  for (const r of rocks) {
+    ctx.save();
+    ctx.translate(r.x, r.y); ctx.rotate(r.rot);
+    ctx.fillStyle = '#8d6e63';
+    ctx.beginPath();
+    for (let i = 0; i < 8; i++) {
+      const a = (i / 8) * 6.283;
+      const rr = r.r * (0.82 + 0.18 * Math.sin(i * 2.7 + 1));
+      ctx[i === 0 ? 'moveTo' : 'lineTo'](Math.cos(a) * rr, Math.sin(a) * rr);
+    }
+    ctx.closePath(); ctx.fill();
+    ctx.fillStyle = '#6d4c41';
+    ctx.beginPath(); ctx.arc(-r.r * 0.3, -r.r * 0.2, r.r * 0.28, 0, 6.29); ctx.fill();
+    ctx.beginPath(); ctx.arc(r.r * 0.35, r.r * 0.3, r.r * 0.2, 0, 6.29); ctx.fill();
+    ctx.restore();
+  }
+
+  // ship
+  ctx.save();
+  ctx.translate(ship.x, ship.y); ctx.rotate(ship.angle);
+  ctx.shadowColor = '#ff5e78'; ctx.shadowBlur = 16;
+  ctx.fillStyle = '#ff5e78';
+  ctx.beginPath(); ctx.moveTo(20, 0); ctx.lineTo(-12, -13); ctx.lineTo(-6, 0); ctx.lineTo(-12, 13); ctx.closePath(); ctx.fill();
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = '#ffffff';
+  ctx.beginPath(); ctx.arc(6, 0, 5.5, 0, 6.29); ctx.fill();
+  ctx.fillStyle = '#ffd23f';
+  ctx.beginPath(); ctx.arc(7.5, 0, 2.5, 0, 6.29); ctx.fill();
+  ctx.restore();
+
+  // HUD
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '800 44px system-ui, sans-serif';
+  ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+  ctx.fillText(String(score), 24, 18);
+  ctx.font = '600 17px system-ui, sans-serif';
+  ctx.fillStyle = '#ffffff99';
+  ctx.fillText('BEST ' + best, 26, 70);
+  ctx.textAlign = 'right';
+  ctx.fillText('SPEED x' + (speed / 260).toFixed(1), W - 24, 22);
+  ctx.textAlign = 'left';
+
+  if (state === 'ready') {
+    ctx.fillStyle = '#00000088'; ctx.fillRect(0, 0, W, H);
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#ffd23f';
+    ctx.font = '800 64px system-ui, sans-serif';
+    ctx.fillText('STAR FLIP', W / 2, H / 2 - 90);
+    ctx.fillStyle = '#ffffff';
+    ctx.font = '600 26px system-ui, sans-serif';
+    ctx.fillText('One button. Flip gravity. Grab stars. Dodge rocks.', W / 2, H / 2 - 8);
+    ctx.fillStyle = '#00d4ff';
+    ctx.font = '800 30px system-ui, sans-serif';
+    ctx.fillText('SPACE or CLICK to start', W / 2, H / 2 + 48);
+    ctx.textAlign = 'left';
+  }
+
+  if (state === 'over') {
+    ctx.fillStyle = '#000000aa'; ctx.fillRect(0, 0, W, H);
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#ff5e78';
+    ctx.font = '800 64px system-ui, sans-serif';
+    ctx.fillText('GAME OVER', W / 2, H / 2 - 90);
+    ctx.fillStyle = '#ffffff';
+    ctx.font = '800 40px system-ui, sans-serif';
+    ctx.fillText('SCORE ' + score, W / 2, H / 2 - 8);
+    ctx.font = '600 24px system-ui, sans-serif';
+    ctx.fillStyle = '#ffffffcc';
+    ctx.fillText('BEST ' + best + '   ·   SPACE or CLICK to fly again', W / 2, H / 2 + 52);
+    ctx.textAlign = 'left';
+  }
+
+  if (flash > 0) {
+    ctx.fillStyle = 'rgba(255,60,60,' + flash * 0.45 + ')';
+    ctx.fillRect(0, 0, W, H);
+    flash = Math.max(0, flash - 0.03);
+  }
+}
+
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000);
+  last = now;
+  update(dt);
+  draw();
+  requestAnimationFrame(frame);
+}
+reset();
+state = 'ready';
+if (AUTOPLAY) { reset(); }
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
